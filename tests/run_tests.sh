@@ -22,10 +22,10 @@ print_result() {
 echo "
 --- Running Test 1: Nominal Prediction (API v1) ---"
 response_v1=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://localhost/predict" \
-     -H "Content-Type: application/json" \
-     -d '{"sentence": "Oh yeah, that was soooo cool!"}' \
-     --user admin:admin \
-     --cacert ./deployments/nginx/certs/nginx.crt)
+    -H "Content-Type: application/json" \
+    -d '{"sentence": "Oh yeah, that was soooo cool!"}' \
+    --user admin:admin \
+    --cacert ./deployments/nginx/certs/nginx.crt)
 
 if [ "$response_v1" -eq 200 ]; then
     print_result 0 "API v1 returned HTTP 200 OK."
@@ -37,11 +37,11 @@ fi
 echo "
 --- Running Test 2: A/B Routing (API v2) ---"
 response_v2_body=$(curl -s -X POST "https://localhost/predict" \
-     -H "Content-Type: application/json" \
-     -H "X-Experiment-Group: debug" \
-     -d '{"sentence": "Oh yeah, that was soooo cool!"}' \
-     --user admin:admin \
-     --cacert ./deployments/nginx/certs/nginx.crt)
+    -H "Content-Type: application/json" \
+    -H "X-Experiment-Group: debug" \
+    -d '{"sentence": "Oh yeah, that was soooo cool!"}' \
+    --user admin:admin \
+    --cacert ./deployments/nginx/certs/nginx.crt)
 
 if echo "$response_v2_body" | grep -q 'prediction_proba_dict'; then
     print_result 0 "API v2 response contains 'prediction_proba_dict'."
@@ -53,10 +53,10 @@ fi
 echo "
 --- Running Test 3: Authentication Failure ---"
 response_auth=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://localhost/predict" \
-     -H "Content-Type: application/json" \
-     -d '{"sentence": "test"}' \
-     --user admin:wrongpassword \
-     --cacert ./deployments/nginx/certs/nginx.crt)
+    -H "Content-Type: application/json" \
+    -d '{"sentence": "test"}' \
+    --user admin:wrongpassword \
+    --cacert ./deployments/nginx/certs/nginx.crt)
 
 if [ "$response_auth" -eq 401 ]; then
     print_result 0 "Authentication failed with incorrect credentials as expected (HTTP 401)."
@@ -67,27 +67,24 @@ fi
 # --- Test 4: Rate Limiting ---
 echo "
 --- Running Test 4: Rate Limiting ---"
-# Send 15 requests in a loop
-for i in {1..15}; do
-    curl -s -o /dev/null -w "%{http_code}\n" -X POST "https://localhost/predict" \
-         -H "Content-Type: application/json" \
-         -d '{"sentence": "test"}' \
-         --user admin:admin \
-         --cacert ./deployments/nginx/certs/nginx.crt &
-done
-wait
+# Send 15 requests in parallel
+burst_codes=$(
+    for i in {1..15}; do
+        curl -s -o /dev/null -w "%{http_code}\n" -X POST "https://localhost/predict" \
+            -H "Content-Type: application/json" \
+            -d '{"sentence": "test"}' \
+            --user admin:admin \
+            --cacert ./deployments/nginx/certs/nginx.crt &
+    done
+    wait
+)
 
-# Check for 429 status code in the responses
-# A simple way is to count them. We expect at least one 429.
-# This part is tricky in a script; a more robust implementation would log outputs to files.
-# For now, we'll assume the concept is demonstrated.
-# A proper test would require a more sophisticated client.
-# We will just check if the service is still up.
+# Test 4a: the service must still answer after the burst
 response_after_burst=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://localhost/predict" \
-     -H "Content-Type: application/json" \
-     -d '{"sentence": "test"}' \
-     --user admin:admin \
-     --cacert ./deployments/nginx/certs/nginx.crt)
+    -H "Content-Type: application/json" \
+    -d '{"sentence": "test"}' \
+    --user admin:admin \
+    --cacert ./deployments/nginx/certs/nginx.crt)
 
 if [ "$response_after_burst" -ne 502 ]; then
     print_result 0 "Rate limiting test passed (service is still available)."
@@ -95,6 +92,13 @@ else
     print_result 1 "Rate limiting test failed (service became unavailable)."
 fi
 
+# Test 4b: the burst itself must have been limited; at least one request rejected with 429
+count_429=$(echo "$burst_codes" | grep -c 429)
+if [ "$count_429" -ge 1 ]; then
+    print_result 0 "Rate limiter rejected $count_429 requests (HTTP 429)."
+else
+    print_result 1 "Rate limiter rejected none of the burst requests (no HTTP 429)."
+fi
 
 # --- Test 5: Prometheus Availability ---
 echo "
@@ -116,6 +120,39 @@ if [ "$response_grafana" -eq 200 ]; then
     print_result 0 "Grafana is available (HTTP 200)."
 else
     print_result 1 "Grafana is not available (HTTP $response_grafana)."
+fi
+
+# --- Test 7: HTTP to HTTPS Redirect ---
+echo "
+--- Running Test 7: HTTP to HTTPS Redirect ---"
+response_redirect=$(curl -s -o /dev/null -w "%{http_code} %{redirect_url}" http://localhost/predict)
+
+if [ "$response_redirect" = "301 https://localhost/predict" ]; then
+    print_result 0 "HTTP is redirected to HTTPS (HTTP 301)."
+else
+    print_result 1 "HTTP is not redirected. Request returned: '$response_redirect' instead of HTTP 301."
+fi
+
+# --- Test 8: Load Balancing (API v1 Replicas) ---
+echo "
+--- Running Test 8: Load Balancing (API v1 Replicas) ---"
+sleep 1 # Recovery from Test 4
+upstreams=$(
+    for i in {1..6}; do
+        curl -s -o /dev/null -D - -X POST "https://localhost/predict" \
+            -H "Content-Type: application/json" \
+            -d '{"sentence": "This is a test!"}' \
+            --user admin:admin \
+            --cacert ./deployments/nginx/certs/nginx.crt | grep -i '^x-upstream-addr'
+        sleep 0.2 # Stay below the rate limit
+    done
+)
+replica_count=$(echo "$upstreams" | sort -u | wc -l)
+
+if [ "$replica_count" -eq 3 ]; then
+    print_result 0 "Requests were distributed over 3 replicas."
+else
+    print_result 1 "Requests reached $replica_count replica(s) instead of all 3."
 fi
 
 # --- Final Result ---

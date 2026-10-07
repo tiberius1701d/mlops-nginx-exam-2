@@ -1,27 +1,97 @@
 services:
+  api-v1:
+    build:
+      context: .
+      dockerfile: src/api/v1/Dockerfile
+    deploy:
+      replicas: 3 # Launch 3 instances
+    restart: unless-stopped # Restart the container if it crashes, but not after a manual stop
+    expose:
+      - "8000"
+    healthcheck: # Healthy once the API answers HTTP requests
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  api-v2:
+    build:
+      context: .
+      dockerfile: src/api/v2/Dockerfile
+    restart: unless-stopped # Restart the container if it crashes, but not after a manual stop
+    expose:
+      - "8000"
+    healthcheck: # Healthy once the API answers HTTP requests
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  nginx:
+    build:
+      context: deployments/nginx
+      dockerfile: Dockerfile
+    container_name: nginx_server
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
+    depends_on:
+      api-v1:
+        condition: service_healthy
+      api-v2:
+        condition: service_healthy
+
+  nginx_exporter:
+    image: nginx/nginx-prometheus-exporter:1.5.0
+    container_name: nginx_exporter
+    depends_on:
+      - nginx
+    environment:
+      - SCRAPE_URI=http://nginx:8080/nginx_status
+
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.15.0
     container_name: prometheus_server
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     depends_on:
-      - nginx
+      - nginx_exporter
+    healthcheck: # Healthy once Prometheus is ready to serve queries
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.3
     container_name: grafana_dashboard
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./deployments/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./deployments/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./deployments/grafana/nginx-dashboard.json:/etc/grafana/dashboards/nginx-dashboard.json:ro
     depends_on:
       - prometheus
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
+    healthcheck: # Healthy once Grafana answers its health endpoint
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      start_period: 30s # First start sets up the database; failures in this window don't count
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.123.0.0/24 # Fixed range, allowed to read /nginx_status in nginx.conf
 
 volumes:
   prometheus_data:

@@ -1,269 +1,233 @@
-## Instructions pour l'Examen / Exam Instructions
+# Sentiment API behind an Nginx Gateway
 
-<details>
-<summary>🇫🇷 Version Française</summary>
+A machine learning API that predicts the emotion of an English sentence (13 classes, such as *love*, *worry* or *neutral*), served through Nginx as the single, secured entry point. The stack runs in Docker Compose and is started, stopped and tested with `make`.
 
-### Examen MLOps : Déploiement Avancé avec Nginx 🚀
+The project solves the DataScientest exam "Advanced Deployment with Nginx"; the original task is in [docs/exam-brief.md](docs/exam-brief.md).
 
-#### Contexte
+## Features
 
-Pour cet examen, vous allez mettre en œuvre une architecture MLOps robuste et sécurisée. Le cœur du projet est d'utiliser Nginx comme une API Gateway pour servir un modèle de Machine Learning via une API FastAPI. Vous devrez non seulement rendre le service fonctionnel, mais aussi implémenter des fonctionnalités avancées essentielles en production : scalabilité, sécurité, et stratégies de déploiement modernes.
+| # | Objective | How this project meets it |
+|---|---|---|
+| 1 | Reverse proxy | Nginx is the only service reachable from the host for the API; the API containers have no published ports. |
+| 2 | Load balancing | `api-v1` runs 3 instances; Nginx distributes the requests over the 3 replicas (Round Robin). |
+| 3 | HTTPS | Nginx terminates TLS with a self-signed certificate for `localhost`; plain HTTP is redirected to HTTPS (HTTP 301). |
+| 4 | Access control | `/predict` requires HTTP basic authentication. |
+| 5 | Rate limiting | `/predict` accepts 10 requests per second per client IP, with a burst of 5; requests beyond that are rejected (HTTP 429). |
+| 6 | A/B testing | Requests carrying the header `X-Experiment-Group: debug` go to `api-v2`, which also returns the probability of every class; any other request goes to `api-v1`. |
+| 7 | Monitoring | An Nginx exporter turns Nginx's status page into metrics. Prometheus collects them. Grafana reads from Prometheus and shows the metrics on a dashboard (Nginx). |
 
-#### Objectifs du Projet
-
-Votre mission est de configurer une architecture conteneurisée complète qui remplit les objectifs suivants :
-
-1.  **Proxy Inverse (Reverse Proxy)** : Nginx doit agir comme le seul point d'entrée et router le trafic vers les services API appropriés.
-
-2.  **Équilibrage de Charge (Load Balancing)** : L'API principale (`api-v1`) doit être déployée en plusieurs instances (3 répliques) pour garantir la haute disponibilité et la répartition de la charge.
-
-3.  **Sécurité HTTPS** : Toutes les communications externes doivent être chiffrées via HTTPS. Vous générerez des certificats auto-signés pour cela. Le trafic HTTP simple devra être automatiquement redirigé vers HTTPS.
-
-4.  **Contrôle d'Accès** : L'accès au point de terminaison de prédiction (`/predict`) doit être protégé par une authentification basique (nom d'utilisateur / mot de passe).
-
-5.  **Limitation de Débit (Rate Limiting)** : Pour protéger l'API contre les surcharges, l'endpoint `/predict` doit limiter le nombre de requêtes (ex: 10 requêtes/seconde par IP).
-
-6.  **A/B Testing** : Vous déploierez deux versions de l'API.
-    *   `api-v1` : La version standard.
-    *   `api-v2` : Une version "debug" qui retourne des informations supplémentaires.
-    *   Nginx devra router le trafic vers `api-v2` **uniquement si** la requête contient l'en-tête HTTP `X-Experiment-Group: debug`. Sinon, le trafic doit aller vers `api-v1`.
-
-7.  **Monitoring (Bonus)** : Mettre en place une stack de monitoring avec Prometheus et Grafana pour collecter et visualiser les métriques de Nginx.
-
-#### Architecture Cible
-
-Le schéma suivant illustre l'architecture complète que vous devez construire. Nginx sert de passerelle centrale, gérant le trafic vers les différentes versions de l'API et exposant les métriques pour le monitoring.
+## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Utilisateur"
-        U[Client] -->|Requête HTTPS| N
+    U[Client] -->|"HTTP :80 (redirected) / HTTPS :443"| N[Nginx gateway]
+
+    subgraph "Docker Compose project 'mlops'"
+        N -->|"default"| V1[Upstream api-v1]
+        N -->|"X-Experiment-Group: debug"| V2[Upstream api-v2]
+
+        subgraph "api-v1 (3 replicas)"
+            V1 --- R1[Replica 1]
+            V1 --- R2[Replica 2]
+            V1 --- R3[Replica 3]
+        end
+
+        V2 --- D[api-v2 container]
+
+        E[Nginx exporter] -->|"reads /nginx_status on internal port 8080"| N
+        P[Prometheus] -->|"scrapes metrics every 3 s"| E
+        G[Grafana] -->|"queries"| P
     end
 
-    subgraph "Infrastructure Conteneurisée (Docker)"
-        N[Nginx Gateway] -->|Load Balancing| V1
-        N -->|"A/B Test (Header)"| V2
-
-        subgraph "API v1 (Scalée)"
-            V1[Upstream: api-v1]
-            V1_1[Replica 1]
-            V1_2[Replica 2]
-            V1_3[Replica 3]
-            V1 --- V1_1
-            V1 --- V1_2
-            V1 --- V1_3
-        end
-
-        subgraph "API v2 (Debug)"
-            V2[Upstream: api-v2]
-        end
-
-        subgraph "Stack de Monitoring"
-            N -->|/nginx_status| NE[Nginx Exporter]
-            NE -->|Métriques| P[Prometheus]
-            P -->|Source de données| G[Grafana]
-            U_Grafana[Admin] -->|Consulte Dashboards| G
-        end
-    end
-
-    style N fill:#269539,stroke:#333,stroke-width:2px,color:#fff
-    style G fill:#F46800,stroke:#333,stroke-width:2px,color:#fff
-    style P fill:#E6522C,stroke:#333,stroke-width:2px,color:#fff
+    A[Admin] -->|":3000"| G
 ```
 
-#### Structure Cible du Projet
+Clients reach the stack only through Nginx, over HTTP on port 80 (redirected) or HTTPS on port 443. Nginx forwards each prediction request to one of two upstreams, named groups of API containers: `api-v1` with three replicas for regular traffic, and `api-v2` with a single container for requests in the debug group. Alongside the request path, the Nginx exporter reads Nginx's status page, Prometheus collects the exporter's metrics every 3 seconds, and Grafana queries Prometheus; an administrator opens Grafana on port 3000.
 
-Voici l'arborescence de fichiers que vous devez obtenir à la fin :
+### How Nginx handles a request
 
-```sh
-. 
-├── Makefile
+1. **Port 80:** every request is redirected to the same URL on HTTPS.
+2. **Port 443:** Nginx completes the TLS handshake with the certificate from `deployments/nginx/certs/`.
+3. **`/predict`:**
+   1. Basic authentication against `.htpasswd`; a wrong or missing password gets 401.
+   2. Rate limit per client IP; a request over the limit gets 429.
+   3. The value of the header `X-Experiment-Group` selects the upstream: `debug` → `api-v2`, anything else or no header → `api-v1`.
+   4. Nginx forwards the request and adds the response header `X-Upstream-Addr`, the address of the container that answered. The tests use it to see the load distribution.
+4. **Port 8080, internal:** serves only `/nginx_status`, a plain-text page with Nginx's live statistics: open connections, connections accepted and handled since start, total requests, and how many connections are currently reading, writing or waiting. The Nginx exporter reads this page and turns the numbers into metrics for Prometheus. Port 8080 is not published to the host, so only containers on the Compose network can reach the page; in addition, Nginx accepts only callers from the network's address range `10.123.0.0/24` and from inside its own container (`127.0.0.1`). The public HTTPS server does not serve the page.
+
+### Startup order
+
+Compose starts the API containers first. Each one has a healthcheck that is satisfied once the API answers, which happens only after the model has loaded. Nginx starts when all four API containers are healthy, so the first request never meets an API that is still starting. Prometheus and Grafana have healthchecks as well, and `make start-project` returns only when every healthcheck passes.
+
+## Services and Ports
+
+All published ports are bound to `127.0.0.1`, so the stack is reachable only from the machine it runs on.
+
+| Service | Built from | Host port | Purpose |
+|---|---|---|---|
+| `nginx` | `deployments/nginx/Dockerfile` | 80, 443 | Gateway: redirect, TLS, authentication, rate limit, routing; status page for the exporter on internal port 8080 |
+| `api-v1` (×3) | `src/api/v1/Dockerfile` | none | Standard API |
+| `api-v2` | `src/api/v2/Dockerfile` | none | Debug API, adds class probabilities to the response |
+| `nginx_exporter` | `nginx/nginx-prometheus-exporter:1.5.0` | none | Converts Nginx's status page into Prometheus metrics |
+| `prometheus` | `prom/prometheus:v3.15.0` | 9090 | Collects and stores the metrics |
+| `grafana` | `grafana/grafana:13.2.3` | 3000 | Nginx dashboard on top of Prometheus |
+
+The Nginx image is built by this project and contains its configuration, certificate and password file.
+
+Prometheus and Grafana run the unchanged public images. This project adds its own configuration files, which Compose places into the containers read-only:
+
+- `deployments/prometheus/prometheus.yml` tells Prometheus to collect the exporter's metrics.
+- The three files in `deployments/grafana/` give Grafana its Prometheus data source and the *Nginx* dashboard. Grafana loads them at every start, so the dashboard is there without setting anything up by hand.
+
+Both keep their collected data in the volumes `prometheus_data` and `grafana_data`.
+
+## Quick Start
+
+Prerequisites: Docker Engine with the Compose plugin, `make`, `curl` and `bash`. Ports 80, 443, 3000 and 9090 must be free on `127.0.0.1`.
+
+```bash
+make start-project   # build the images, start the stack, wait until it is healthy
+make test            # restart the stack and run the test script
+make stop-project    # stop and remove the containers (volumes are kept)
+make rerun-project   # stop, then start again from scratch
+make test-api        # send one prediction request
+```
+
+`make test` restarts the stack before testing, so it also works on its own, without a prior `make start-project`.
+
+## Using the API
+
+Standard prediction, answered by one of the `api-v1` replicas:
+
+```bash
+curl -X POST "https://localhost/predict" \
+     -H "Content-Type: application/json" \
+     -d '{"sentence": "I love this sunny day"}' \
+     --user admin:admin \
+     --cacert ./deployments/nginx/certs/nginx.crt
+```
+
+```json
+{"prediction value": "love"}
+```
+
+The same request with the header `-H "X-Experiment-Group: debug"` is answered by `api-v2` and adds `prediction_proba_dict`, the probability of each of the 13 classes.
+
+`--cacert` tells `curl` to trust the self-signed certificate. A browser shows a warning for it instead.
+
+Monitoring:
+
+- Prometheus: <http://localhost:9090>, target `nginx_exporter:9113` under *Status → Targets*
+- Grafana: <http://localhost:3000>, login `admin` / `admin`. The dashboard *Nginx* (<http://localhost:3000/d/nginx>) refreshes every 5 seconds and shows whether Nginx is up, requests per second, active connections, connections by state (reading, writing, waiting), and accepted versus handled connections per second, where handled below accepted means dropped connections.
+
+## Tests
+
+`tests/run_tests.sh` sends real requests through Nginx and exits with a non-zero code if any test fails. `make test` runs it.
+
+| Test | Expects | Objective |
+|---|---|---|
+| 1 | Prediction with valid credentials returns 200 | 1, 3, 4 |
+| 2 | Request with `X-Experiment-Group: debug` returns `prediction_proba_dict` | 6 |
+| 3 | Wrong password returns 401 | 4 |
+| 4a | After a burst of 15 parallel requests, the service still answers (no 502) | 5 |
+| 4b | At least one request of the burst was rejected with 429 | 5 |
+| 5 | Prometheus answers on port 9090 | 7 |
+| 6 | Grafana answers on port 3000 | 7 |
+| 7 | `http://localhost/predict` returns 301 to `https://localhost/predict` | 3 |
+| 8 | Six consecutive requests are answered by three different `api-v1` containers | 2 |
+
+Tests 1 to 6 are the ones provided with the exam. They confirm that the API answers, that routing and authentication work, and that the monitoring services are up, but three objectives remain unverified by them:
+
+- **Rate limiting:** test 4a only confirms that the service survives a burst, which it also does with no limit at all.
+- **HTTP redirect:** every provided test calls HTTPS directly, so port 80 is never reached.
+- **Load balancing:** a single `api-v1` container answers every provided test just as well as three.
+
+Tests 4b, 7 and 8 close these gaps, so that a passing `make test` confirms all six required objectives, not only the parts the provided tests reach. Each of them fails if its feature is removed.
+
+## Configuration
+
+| What | Where | Value |
+|---|---|---|
+| Users for `/predict` | `deployments/nginx/.htpasswd` | `admin` / `admin` |
+| Rate limit | `deployments/nginx/nginx.conf` | 10 requests/s per IP, burst 5, status 429 |
+| A/B routing | `deployments/nginx/nginx.conf` | `map` on the header `X-Experiment-Group` |
+| Number of `api-v1` replicas | `docker-compose.yml` | 3 |
+| Compose network | `docker-compose.yml` | `10.123.0.0/24`, the range allowed to read `/nginx_status` |
+| Scrape target and interval | `deployments/prometheus/prometheus.yml` | `nginx_exporter:9113`, every 3 s |
+| Grafana admin login | `docker-compose.yml` | `admin` / `admin` |
+| Grafana data source | `deployments/grafana/datasource.yml` | Prometheus at `http://prometheus:9090`, default |
+| Grafana dashboard | `deployments/grafana/nginx-dashboard.json`, loaded through `deployments/grafana/dashboards.yml` | dashboard *Nginx* |
+
+Changes to the Nginx configuration, the certificate or the password file take effect after the image is rebuilt, which `make start-project` does.
+
+### Certificate
+
+The certificate is self-signed, valid for `localhost` for one year. To create a new one:
+
+```bash
+openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+  -keyout deployments/nginx/certs/nginx.key \
+  -out deployments/nginx/certs/nginx.crt \
+  -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost"
+```
+
+### Password file
+
+To add a user or change a password (`htpasswd` comes with the Apache utilities):
+
+```bash
+htpasswd deployments/nginx/.htpasswd <user>
+```
+
+### API dependencies
+
+Both API versions share one [uv](https://docs.astral.sh/uv/) project in `src/api/`. The images install the exact versions from `uv.lock`. scikit-learn is pinned to 1.6.1, the version the model was saved with. `requirements.txt` is generated from the lock file:
+
+```bash
+cd src/api
+uv add <package>
+uv export --no-hashes --no-dev --format requirements-txt -o requirements.txt
+```
+
+## Project Structure
+
+```text
+.
+├── .dockerignore                 # files kept out of the API image builds
+├── .gitignore
+├── Makefile                      # start-project, stop-project, rerun-project, test, test-api
 ├── README.md
-├── README_student.md
-├── data
-│   └── tweet_emotions.csv
+├── docker-compose.yml            # all services, healthchecks, network, volumes
 ├── deployments
+│   ├── grafana
+│   │   ├── datasource.yml        # Prometheus as Grafana's data source
+│   │   ├── dashboards.yml        # where Grafana loads dashboards from
+│   │   └── nginx-dashboard.json  # the Nginx dashboard
 │   ├── nginx
-│   │   ├── Dockerfile
-│   │   ├── certs
-│   │   │   ├── nginx.crt
-│   │   │   └── nginx.key
-│   │   └── nginx.conf
+│   │   ├── Dockerfile            # Nginx image with configuration, certificate and users
+│   │   ├── nginx.conf
+│   │   ├── .htpasswd
+│   │   └── certs
+│   │       ├── nginx.crt
+│   │       └── nginx.key
 │   └── prometheus
 │       └── prometheus.yml
-├── docker-compose.yml
+├── docs
+│   └── exam-brief.md             # the original exam task
 ├── model
-│   └── model.joblib
+│   └── model.joblib              # trained scikit-learn pipeline
 ├── src
-│   ├── api
-│   │   ├── requirements.txt
-│   │   ├── v1
-│   │   │   ├── Dockerfile
-│   │   │   └── main.py
-│   │   └── v2
-│   │       ├── Dockerfile
-│   │       └── main.py
-│   └── gen_model.py
+│   └── api
+│       ├── pyproject.toml        # uv project shared by v1 and v2
+│       ├── uv.lock
+│       ├── requirements.txt      # exported from uv.lock
+│       ├── v1
+│       │   ├── Dockerfile
+│       │   └── main.py           # standard API
+│       └── v2
+│           ├── Dockerfile
+│           └── main.py           # debug API
 └── tests
     └── run_tests.sh
 ```
-
-#### Livrables
-
-Vous devez soumettre une archive `.zip` ou `.tar.gz` contenant l'intégralité de votre projet, incluant :
-
--   **Tous les `Dockerfiles`** nécessaires pour construire les images de vos services.
--   Le fichier **`docker-compose.yml`** orchestrant tous les services (Nginx, api-v1, api-v2, monitoring).
--   Le fichier **`nginx.conf`** complet avec toutes les directives requises.
--   Les fichiers de configuration et de sécurité (`.htpasswd`, certificats SSL, `prometheus.yml`).
--   Le code source des deux versions de l'API.
--   Un **`Makefile`** avec des commandes claires pour `start-project`, `stop-project`, et `test`.
--   Un script de test (`tests/run_tests.sh`) qui valide automatiquement les fonctionnalités clés.
-
-#### Critères d'Évaluation
-
-**Important :** La validation finale de votre projet se fera en exécutant la commande `make test`. Celle-ci doit s'exécuter sans erreur et tous les tests doivent passer avec succès.
-
--   **Fonctionnalité** : Toutes les fonctionnalités (de 1 à 6) sont implémentées et fonctionnent correctement.
--   **Qualité du Code** : Les fichiers de configuration (`nginx.conf`, `docker-compose.yml`) sont clairs, commentés si nécessaire, et bien structurés.
--   **Reproductibilité** : Le projet peut être lancé sans erreur avec `make start-project`.
--   **Automatisation** : Le `Makefile` et le script de test sont efficaces et permettent de valider le projet facilement.
--   **Clarté de la Documentation** : Le `README.md` principal explique clairement l'architecture et l'utilisation du projet.
-
-Bon courage ! 🚀
-
-</details>
-
-<details>
-<summary>🇬🇧 English Version</summary>
-
-### MLOps Exam: Advanced Deployment with Nginx 🚀
-
-#### Context
-
-For this exam, you will implement a robust and secure MLOps architecture. The core of the project is to use Nginx as an API Gateway to serve a Machine Learning model via a FastAPI API. You will not only make the service functional but also implement advanced features essential for production: scalability, security, and modern deployment strategies.
-
-#### Project Objectives
-
-Your mission is to set up a complete containerized architecture that meets the following objectives:
-
-1.  **Reverse Proxy**: Nginx must act as the single point of entry and route traffic to the appropriate API services.
-
-2.  **Load Balancing**: The main API (`api-v1`) must be deployed in multiple instances (3 replicas) to ensure high availability and load distribution.
-
-3.  **HTTPS Security**: All external communications must be encrypted via HTTPS. You will generate self-signed certificates for this purpose. Plain HTTP traffic must be automatically redirected to HTTPS.
-
-4.  **Access Control**: Access to the prediction endpoint (`/predict`) must be protected by basic authentication (username/password).
-
-5.  **Rate Limiting**: To protect the API from overload, the `/predict` endpoint must limit the number of requests (e.g., 10 requests/second per IP).
-
-6.  **A/B Testing**: You will deploy two versions of the API.
-    *   `api-v1`: The standard version.
-    *   `api-v2`: A "debug" version that returns additional information.
-    *   Nginx must route traffic to `api-v2` **only if** the request contains the `X-Experiment-Group: debug` HTTP header. Otherwise, traffic should be routed to `api-v1`.
-
-7.  **Monitoring (Bonus)**: Set up a monitoring stack with Prometheus and Grafana to collect and visualize Nginx metrics.
-
-#### Target Architecture
-
-The following diagram illustrates the complete architecture you need to build. Nginx acts as a central gateway, managing traffic to the different API versions and exposing metrics for monitoring.
-
-```mermaid
-graph TD
-    subgraph "User"
-        U[Client] -->|HTTPS Request| N
-    end
-
-    subgraph "Containerized Infrastructure (Docker)"
-        N[Nginx Gateway] -->|Load Balancing| V1
-        N -->|"A/B Test (Header)"| V2
-
-        subgraph "API v1 (Scaled)"
-            V1[Upstream: api-v1]
-            V1_1[Replica 1]
-            V1_2[Replica 2]
-            V1_3[Replica 3]
-            V1 --- V1_1
-            V1 --- V1_2
-            V1 --- V1_3
-        end
-
-        subgraph "API v2 (Debug)"
-            V2[Upstream: api-v2]
-        end
-
-        subgraph "Monitoring Stack"
-            N -->|/nginx_status| NE[Nginx Exporter]
-            NE -->|Metrics| P[Prometheus]
-            P -->|Data Source| G[Grafana]
-            U_Grafana[Admin] -->|View Dashboards| G
-        end
-    end
-
-    style N fill:#269539,stroke:#333,stroke-width:2px,color:#fff
-    style G fill:#F46800,stroke:#333,stroke-width:2px,color:#fff
-    style P fill:#E6522C,stroke:#333,stroke-width:2px,color:#fff
-```
-
-#### Target Project Structure
-
-Here is the file tree you should aim to have at the end:
-
-```sh
-. 
-├── Makefile
-├── README.md
-├── README_student.md
-├── data
-│   └── tweet_emotions.csv
-├── deployments
-│   ├── nginx
-│   │   ├── Dockerfile
-│   │   ├── certs
-│   │   │   ├── nginx.crt
-│   │   │   └── nginx.key
-│   │   └── nginx.conf
-│   └── prometheus
-│       └── prometheus.yml
-├── docker-compose.yml
-├── model
-│   └── model.joblib
-├── src
-│   ├── api
-│   │   ├── requirements.txt
-│   │   ├── v1
-│   │   │   ├── Dockerfile
-│   │   │   └── main.py
-│   │   └── v2
-│   │       ├── Dockerfile
-│   │       └── main.py
-│   └── gen_model.py
-└── tests
-    └── run_tests.sh
-```
-
-#### Deliverables
-
-You must submit a `.zip` or `.tar.gz` archive containing your entire project, including:
-
--   **All necessary `Dockerfiles`** to build the images for your services.
--   The **`docker-compose.yml`** file orchestrating all services (Nginx, api-v1, api-v2, monitoring).
--   The complete **`nginx.conf`** file with all required directives.
--   Configuration and security files (`.htpasswd`, SSL certificates, `prometheus.yml`).
--   The source code for both API versions.
--   A **`Makefile`** with clear commands for `start-project`, `stop-project`, and `test`.
--   A test script (`tests/run_tests.sh`) that automatically validates the key features.
-
-#### Evaluation Criteria
-
-**Important:** The final validation of your project will be done by running the `make test` command. It must run without errors, and all tests must pass successfully.
-
--   **Functionality**: All features (1 through 6) are implemented and work correctly.
--   **Code Quality**: Configuration files (`nginx.conf`, `docker-compose.yml`) are clear, commented where necessary, and well-structured.
--   **Reproducibility**: The project can be launched without errors using `make start-project`.
--   **Automation**: The `Makefile` and test script are effective and allow for easy project validation.
--   **Documentation Clarity**: The main `README.md` clearly explains the project's architecture and usage.
-
-Good luck! 🚀
-
-</details>

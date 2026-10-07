@@ -1,0 +1,9 @@
+apiVersion: 1 # Required by Grafana, version of the file format
+
+datasources:
+  - name: Prometheus
+    uid: prometheus # Fixed id, so the dashboard can refer to this data source
+    type: prometheus
+    access: proxy # Grafana's server queries Prometheus, not the browser
+    url: http://prometheus:9090 # Compose service name and port
+    isDefault: true

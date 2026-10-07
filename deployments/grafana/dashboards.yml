@@ -1,0 +1,7 @@
+apiVersion: 1 # Required by Grafana, version of the file format
+
+providers:
+  - name: Nginx
+    type: file
+    options:
+      path: /etc/grafana/dashboards # Where nginx-dashboard.json is mounted

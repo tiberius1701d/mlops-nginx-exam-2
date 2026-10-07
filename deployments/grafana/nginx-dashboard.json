@@ -1,0 +1,135 @@
+{
+  "uid": "nginx",
+  "title": "Nginx",
+  "description": "Gateway status, request rate and connections, from the Nginx exporter via Prometheus",
+  "tags": ["nginx"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Nginx up",
+      "description": "1 when the exporter can read Nginx's status page, 0 otherwise",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "nginx_up"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Requests per second",
+      "description": "Requests Nginx handled per second, averaged over one minute",
+      "gridPos": { "x": 6, "y": 0, "w": 18, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(nginx_http_requests_total[1m])",
+          "legendFormat": "requests/s"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Active connections",
+      "description": "Client connections currently open, including idle keep-alive connections",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "nginx_connections_active",
+          "legendFormat": "active"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Connections by state",
+      "description": "Open connections split into reading a request, writing a response, and waiting idle",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "nginx_connections_reading",
+          "legendFormat": "reading"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "nginx_connections_writing",
+          "legendFormat": "writing"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "nginx_connections_waiting",
+          "legendFormat": "waiting"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Accepted vs. handled connections per second",
+      "description": "New connections per second; handled below accepted means Nginx dropped connections",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(nginx_connections_accepted[1m])",
+          "legendFormat": "accepted"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(nginx_connections_handled[1m])",
+          "legendFormat": "handled"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] }
+    }
+  ]
+}
